@@ -1,134 +1,193 @@
+# main.py
 import os
-import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-import matplotlib
 import tkinter as tk
 from tkinter import ttk
+import folium
+from algorithms import rdp, squish
+from utils import read_plt
+import webbrowser
 
-# ===== CONFIG =====
 DATA_PATH = "data/geolife/Data"
-LINE_WIDTH = 2
-FIGSIZE = (8, 6)
-FONT_TITLE = {'fontsize': 16, 'fontweight': 'bold'}
-FONT_LABEL = {'fontsize': 12}
 
-# ===== LOAD USERS =====
-all_users = sorted([u for u in os.listdir(DATA_PATH) if u.isdigit()])
-current_user_index = 0
+# -----------------------------
+# Load users
+# -----------------------------
+users = sorted([u for u in os.listdir(DATA_PATH) if u.isdigit()])
 
-# ===== GLOBALS =====
-lines = []
-current_files = []
+# -----------------------------
+# Create window
+# -----------------------------
+root = tk.Tk()
+root.title("Simple Trajectory Viewer")
 
-# ===== FUNCTIONS =====
-def read_plt(file_path):
-    return pd.read_csv(
-        file_path,
-        skiprows=6,
-        header=None,
-        names=["lat", "lon", "unused", "alt", "date_days", "date", "time"]
+# -----------------------------
+# Dropdowns
+# -----------------------------
+user_var = tk.StringVar()
+traj_var = tk.StringVar()
+algo_var = tk.StringVar(value="None")
+
+def load_trajectories(event=None):
+    user = user_var.get()
+    folder = os.path.join(DATA_PATH, user, "Trajectory")
+    files = [f for f in os.listdir(folder) if f.endswith(".plt")]
+    traj_dropdown["values"] = ["All"] + files
+    traj_var.set("All")
+def plot():
+    import os
+    import webbrowser
+    import folium
+
+    user = user_var.get()
+    traj = traj_var.get()
+    algo = algo_var.get()
+
+    folder = os.path.join(DATA_PATH, user, "Trajectory")
+    files = [f for f in os.listdir(folder) if f.endswith(".plt")]
+
+    # --- 1) Base map: CartoDB Positron (clean, English-like labels) ---
+    # Use explicit URLs + attribution for compatibility across Folium versions
+    m = folium.Map(
+        tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        attr="© OpenStreetMap contributors © CARTO",
+        zoom_start=12
     )
 
-def plot_user(user_id, trajectory_name="All"):
-    """Plot user trajectories. If trajectory_name != 'All', show only that trajectory."""
-    global lines, current_files
-    ax.clear()
-    lines = []
-    traj_folder = os.path.join(DATA_PATH, user_id, "Trajectory")
-    if not os.path.exists(traj_folder):
-        ax.set_title(f"No trajectories for user {user_id}", **FONT_TITLE)
-        canvas.draw()
-        return
+    # Add additional English-friendly basemaps
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    folium.TileLayer(
+        tiles="https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
+        name="Stamen Toner",
+        attr="Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap",
+        overlay=False,
+        control=True
+    ).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        name="Esri WorldGrayCanvas",
+        attr="Tiles © Esri — Esri, DeLorme, NAVTEQ",
+        overlay=False,
+        control=True
+    ).add_to(m)
 
-    files = [f for f in os.listdir(traj_folder) if f.endswith(".plt")]
-    current_files = files
-    colors = matplotlib.colormaps['tab20'].resampled(len(files))
+    # --- 2) Prepare bounds for auto-zoom ---
+    global_min_lat, global_min_lon = +90.0, +180.0
+    global_max_lat, global_max_lon = -90.0, -180.0
+    any_drawn = False
 
-    # Update trajectory dropdown
-    traj_dropdown['values'] = ["All"] + files
-    if trajectory_name not in ["All"] + files:
-        trajectory_name = "All"
-    traj_dropdown.set(trajectory_name)
+    # High-contrast color cycle for simplified trajectories
+    colors = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+        "#bcbd22", "#17becf"
+    ]
 
-    for idx, file in enumerate(files):
-        df = read_plt(os.path.join(traj_folder, file))
-        visible = (trajectory_name == "All") or (trajectory_name == file)
-        line, = ax.plot(df["lon"], df["lat"], color=colors(idx),
-                        linewidth=LINE_WIDTH, alpha=0.9, visible=visible)
-        lines.append(line)
+    # Optional: also show the original under the simplified line (we do this here)
+    show_original_alongside = True
 
-    ax.set_title(f"Trajectories for User {user_id}", **FONT_TITLE)
-    ax.set_xlabel("Longitude", **FONT_LABEL)
-    ax.set_ylabel("Latitude", **FONT_LABEL)
-    ax.grid(True, linestyle='--', alpha=0.6)
-    ax.set_facecolor("#f0f0f0")
-    ax.legend(fontsize=8, loc='upper right')
-    canvas.draw()
+    for idx, f in enumerate(files):
+        if traj != "All" and f != traj:
+            continue
 
-def next_user():
-    global current_user_index
-    current_user_index = (current_user_index + 1) % len(all_users)
-    user_dropdown.set(all_users[current_user_index])
-    plot_user(all_users[current_user_index])
+        pts = read_plt(os.path.join(folder, f))  # [(lat, lon), ...]  NOTE: (lat, lon) order for Folium
+        if not pts:
+            continue
 
-def prev_user():
-    global current_user_index
-    current_user_index = (current_user_index - 1) % len(all_users)
-    user_dropdown.set(all_users[current_user_index])
-    plot_user(all_users[current_user_index])
+        any_drawn = True
 
-def select_user(event):
-    global current_user_index
-    user_id = user_dropdown.get()
-    if user_id in all_users:
-        current_user_index = all_users.index(user_id)
-        plot_user(user_id)
+        # Update bounds from original points
+        lats = [p[0] for p in pts]
+        lons = [p[1] for p in pts]
+        global_min_lat = min(global_min_lat, min(lats))
+        global_max_lat = max(global_max_lat, max(lats))
+        global_min_lon = min(global_min_lon, min(lons))
+        global_max_lon = max(global_max_lon, max(lons))
 
-def select_trajectory(event):
-    trajectory_name = traj_dropdown.get()
-    plot_user(all_users[current_user_index], trajectory_name)
+        color = colors[idx % len(colors)]
 
-# ===== TKINTER SETUP =====
-root = tk.Tk()
-root.title("Interactive GeoLife Trajectory Viewer")
+        # ------------- ORIGINAL (thin, light gray) -------------
+        if show_original_alongside:
+            folium.PolyLine(
+                pts,
+                color="#bbbbbb",
+                weight=2,
+                opacity=0.7,
+                tooltip=f"{f} (Original: {len(pts)} pts)"
+            ).add_to(m)
 
-# Create matplotlib figure
-fig, ax = plt.subplots(figsize=FIGSIZE)
-canvas = FigureCanvasTkAgg(fig, master=root)
-canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+            # small black markers for original start/end
+            folium.CircleMarker(
+                pts[0], radius=4, color="black", fill=True, fill_opacity=1,
+                tooltip="Original Start"
+            ).add_to(m)
+            folium.CircleMarker(
+                pts[-1], radius=4, color="black", fill=True, fill_opacity=1,
+                tooltip="Original End"
+            ).add_to(m)
 
-# Add toolbar
-toolbar = NavigationToolbar2Tk(canvas, root)
-toolbar.update()
-canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+        # ------------- SIMPLIFIED (bold, colored) -------------
+        simplified = pts
+        if algo == "Douglas-Peucker":
+            # tweak epsilon to your liking; larger = more aggressive
+            simplified = rdp(pts, epsilon=0.0008)
+        elif algo == "SQUISH":
+            # k controls max retained points (besides endpoints)
+            simplified = squish(pts, k=300)
+        # else: "None" keeps original
 
-# Controls frame
-frame_controls = tk.Frame(root)
-frame_controls.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        # Display simplified line in color
+        reduction_pct = (1 - len(simplified) / len(pts)) * 100 if len(pts) else 0.0
+        folium.PolyLine(
+            simplified,
+            color=color,
+            weight=5,          # thicker for clarity
+            opacity=0.95,
+            tooltip=(f"{f} (Simplified: {len(simplified)} pts — "
+                     f"Reduced {reduction_pct:.1f}%)")
+        ).add_to(m)
 
-# User dropdown
-tk.Label(frame_controls, text="Select User:").pack(side=tk.LEFT, padx=5)
-user_dropdown = ttk.Combobox(frame_controls, values=all_users, width=10)
-user_dropdown.current(current_user_index)
-user_dropdown.bind("<<ComboboxSelected>>", select_user)
-user_dropdown.pack(side=tk.LEFT, padx=5)
+        # Mark simplified start/end (green/red)
+        folium.CircleMarker(
+            simplified[0], radius=5, color="green", fill=True, fill_opacity=1,
+            tooltip="Simplified Start"
+        ).add_to(m)
+        folium.CircleMarker(
+            simplified[-1], radius=5, color="red", fill=True, fill_opacity=1,
+            tooltip="Simplified End"
+        ).add_to(m)
 
-# Trajectory dropdown
-tk.Label(frame_controls, text="Select Trajectory:").pack(side=tk.LEFT, padx=5)
-traj_dropdown = ttk.Combobox(frame_controls, values=["All"], width=25)
-traj_dropdown.bind("<<ComboboxSelected>>", select_trajectory)
-traj_dropdown.pack(side=tk.LEFT, padx=5)
+    # --- 3) Fit map to data or fallback view ---
+    if any_drawn and (global_min_lat < global_max_lat) and (global_min_lon < global_max_lon):
+        m.fit_bounds([[global_min_lat, global_min_lon], [global_max_lat, global_max_lon]])
+    else:
+        # Fallback: world view if nothing drawn
+        m.location = [20.0, 0.0]
+        m.zoom_start = 2
 
-# Previous / Next buttons
-prev_button = tk.Button(frame_controls, text="Previous User", bg="#1f77b4", fg="white",
-                        activebackground="#ff7f0e", command=prev_user)
-prev_button.pack(side=tk.LEFT, padx=10)
-next_button = tk.Button(frame_controls, text="Next User", bg="#1f77b4", fg="white",
-                        activebackground="#ff7f0e", command=next_user)
-next_button.pack(side=tk.LEFT, padx=10)
+    # --- 4) Basemap layer switcher ---
+    folium.LayerControl(position="topright", collapsed=False).add_to(m)
 
-# ===== INITIAL PLOT =====
-plot_user(all_users[current_user_index])
+    # --- 5) Save & open ---
+    m.save("map.html")
+    webbrowser.open("map.html")
+# -----------------------------
+# UI Layout
+# -----------------------------
+tk.Label(root, text="User:").grid(row=0, column=0)
+user_dropdown = ttk.Combobox(root, textvariable=user_var, values=users)
+user_dropdown.grid(row=0, column=1)
+user_dropdown.bind("<<ComboboxSelected>>", load_trajectories)
+
+tk.Label(root, text="Trajectory:").grid(row=1, column=0)
+traj_dropdown = ttk.Combobox(root, textvariable=traj_var, values=["All"])
+traj_dropdown.grid(row=1, column=1)
+
+tk.Label(root, text="Algorithm:").grid(row=2, column=0)
+algo_dropdown = ttk.Combobox(root, textvariable=algo_var,
+                             values=["None", "Douglas-Peucker", "SQUISH"])
+algo_dropdown.grid(row=2, column=1)
+
+plot_button = tk.Button(root, text="Plot on Map", command=plot)
+plot_button.grid(row=3, column=0, columnspan=2, pady=10)
 
 root.mainloop()
