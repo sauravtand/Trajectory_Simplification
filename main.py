@@ -1,18 +1,38 @@
 # main.py
 import os
+import math
+import hashlib
+import webbrowser
 import tkinter as tk
 from tkinter import ttk
+
 import folium
+from branca.element import MacroElement, Template
+
 from algorithms import rdp, squish
 from utils import read_plt
-import webbrowser
 
 DATA_PATH = "data/geolife/Data"
 
 # -----------------------------
+# Helpers
+# -----------------------------
+def color_for_name(name: str, palette: list[str]) -> str:
+    """
+    Deterministically pick a color from 'palette' based on 'name'.
+    Ensures the same file always gets the same color across runs.
+    """
+    h = int(hashlib.md5(name.encode("utf-8")).hexdigest(), 16)
+    return palette[h % len(palette)]
+
+
+# -----------------------------
 # Load users
 # -----------------------------
-users = sorted([u for u in os.listdir(DATA_PATH) if u.isdigit()])
+try:
+    users = sorted([u for u in os.listdir(DATA_PATH) if u.isdigit()])
+except FileNotFoundError:
+    users = []
 
 # -----------------------------
 # Create window
@@ -27,31 +47,34 @@ user_var = tk.StringVar()
 traj_var = tk.StringVar()
 algo_var = tk.StringVar(value="None")
 
+
 def load_trajectories(event=None):
     user = user_var.get()
     folder = os.path.join(DATA_PATH, user, "Trajectory")
-    files = [f for f in os.listdir(folder) if f.endswith(".plt")]
+    try:
+        files = sorted([f for f in os.listdir(folder) if f.endswith(".plt")])
+    except FileNotFoundError:
+        files = []
     traj_dropdown["values"] = ["All"] + files
     traj_var.set("All")
-def plot():
-    import os
-    import webbrowser
-    import math
-    import folium
-    from branca.element import MacroElement, Template
 
+
+def plot():
     user = user_var.get()
     traj = traj_var.get()
     algo = algo_var.get()
 
     folder = os.path.join(DATA_PATH, user, "Trajectory")
-    files = [f for f in os.listdir(folder) if f.endswith(".plt")]
+    try:
+        files = sorted([f for f in os.listdir(folder) if f.endswith(".plt")])
+    except FileNotFoundError:
+        files = []
 
     # --- 1) Base map: CartoDB Positron (clean, English-like labels) ---
     m = folium.Map(
         tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
         attr="© OpenStreetMap contributors © CARTO",
-        zoom_start=12
+        zoom_start=12,
     )
     folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
     folium.TileLayer(
@@ -59,14 +82,14 @@ def plot():
         name="Stamen Toner",
         attr="Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap",
         overlay=False,
-        control=True
+        control=True,
     ).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
         name="Esri WorldGrayCanvas",
         attr="Tiles © Esri — Esri, DeLorme, NAVTEQ",
         overlay=False,
-        control=True
+        control=True,
     ).add_to(m)
 
     # --- 2) Prepare bounds for auto-zoom ---
@@ -78,7 +101,7 @@ def plot():
     colors = [
         "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-        "#bcbd22", "#17becf"
+        "#bcbd22", "#17becf",
     ]
 
     # Helper: add many points efficiently by sampling if needed
@@ -94,8 +117,7 @@ def plot():
         for i in range(0, n, step):
             lat, lon = points[i]
             folium.CircleMarker(
-                [lat, lon], radius=radius, color=color,
-                fill=True, fill_opacity=1
+                [lat, lon], radius=radius, color=color, fill=True, fill_opacity=1
             ).add_to(group)
 
     # Feature groups to toggle layers on/off
@@ -104,11 +126,15 @@ def plot():
     fg_removed_points = folium.FeatureGroup(name="Removed Points (red)", show=True).add_to(m)
     fg_kept_points = folium.FeatureGroup(name="Kept Points (simplified vertices)", show=True).add_to(m)
 
-    for idx, f in enumerate(files):
+    # For dynamic legend: record which files were plotted and what color they used
+    plotted_color_by_file = {}  # filename -> color
+
+    for f in files:
         if traj != "All" and f != traj:
             continue
 
-        pts = read_plt(os.path.join(folder, f))  # [(lat, lon), ...]  NOTE: (lat, lon) order for Folium
+        # NOTE: read_plt returns [(lat, lon), ...] in (lat, lon) order for Folium
+        pts = read_plt(os.path.join(folder, f))
         if not pts:
             continue
 
@@ -122,12 +148,17 @@ def plot():
         global_min_lon = min(global_min_lon, min(lons))
         global_max_lon = max(global_max_lon, max(lons))
 
-        color = colors[idx % len(colors)]
+        # Deterministic color based on filename
+        color = color_for_name(f, colors)
+        plotted_color_by_file[f] = color
 
         # ----- ORIGINAL (thin, light gray line) -----
         folium.PolyLine(
-            pts, color="#bbbbbb", weight=2, opacity=0.7,
-            tooltip=f"{f} (Original: {len(pts)} pts)"
+            pts,
+            color="#bbbbbb",
+            weight=2,
+            opacity=0.7,
+            tooltip=f"{f} (Original: {len(pts)} pts)",
         ).add_to(fg_original_lines)
 
         # ----- SIMPLIFY -----
@@ -157,8 +188,10 @@ def plot():
             color=color,
             weight=5,
             opacity=0.95,
-            tooltip=(f"{f} (Simplified: {len(kept_points)} pts — "
-                     f"Reduced {reduction_pct:.1f}%)")
+            tooltip=(
+                f"{f} (Simplified: {len(kept_points)} pts — "
+                f"Reduced {reduction_pct:.1f}%)"
+            ),
         ).add_to(fg_simplified_lines)
 
         # ----- POINTS -----
@@ -175,9 +208,21 @@ def plot():
         m.location = [20.0, 0.0]
         m.zoom_start = 2
 
-    # --- 4) Legend (top-left) – FIXED macro signature ---
-    legend_html = """
-    {% macro html(this, kwargs) %}
+    # --- 4) Legend (top-left) – dynamic to match actual colors ---
+    if plotted_color_by_file:
+        items_html = "\n".join(
+            f'''<div>
+                   <span style="display:inline-block;width:14px;height:3px;background:{col};margin-right:6px;"></span>
+                   <span style="font-family:monospace;">{fname}</span>
+                 </div>'''
+            for fname, col in plotted_color_by_file.items()
+        )
+    else:
+        items_html = '<div style="color:#666;">No trajectories selected</div>'
+
+    # Clarify that kept points use the same color as the simplified line
+    legend_html = f"""
+    {{% macro html(this, kwargs) %}}
     <div style="
         position: fixed; 
         top: 10px; left: 10px; z-index: 1000;
@@ -186,13 +231,18 @@ def plot():
         border: 1px solid #ccc; 
         border-radius: 6px; 
         font-size: 12px;">
-      <div style="font-weight: 600; margin-bottom: 4px;">Legend</div>
-      <div><span style="display:inline-block;width:14px;height:3px;background:#bbbbbb;margin-right:6px;"></span> Original line</div>
-      <div><span style="display:inline-block;width:14px;height:3px;background:#1f77b4;margin-right:6px;"></span> Simplified line (color varies)</div>
-      <div><span style="display:inline-block;width:10px;height:10px;background:#d62728;border-radius:50%;display:inline-block;margin-right:6px;"></span> Removed points</div>
-      <div><span style="display:inline-block;width:10px;height:10px;background:#1f77b4;border-radius:50%;display:inline-block;margin-right:6px;"></span> Kept points (simplified vertices)</div>
+      <div style="font-weight: 600; margin-bottom: 6px;">Legend</div>
+
+      <div style="margin-bottom:6px;">
+        <div><span style="display:inline-block;width:14px;height:3px;background:#bbbbbb;margin-right:6px;"></span> Original line</div>
+        <div style="margin-top:4px; font-weight:600;">Simplified line & kept points:</div>
+        {items_html}
+      </div>
+
+      <div><span style="display:inline-block;width:10px;height:10px;background:#d62728;border-radius:50%;display:inline-block;margin-right:6px;"></span> Removed points (red)</div>
+      <div style="margin-top:4px;color:#444;">Kept points use the <em>same color</em> as their simplified line.</div>
     </div>
-    {% endmacro %}
+    {{% endmacro %}}
     """
     macro = MacroElement()
     macro._template = Template(legend_html)
@@ -204,6 +254,8 @@ def plot():
     # --- 6) Save & open ---
     m.save("map.html")
     webbrowser.open("map.html")
+
+
 # -----------------------------
 # UI Layout
 # -----------------------------
@@ -217,8 +269,9 @@ traj_dropdown = ttk.Combobox(root, textvariable=traj_var, values=["All"])
 traj_dropdown.grid(row=1, column=1)
 
 tk.Label(root, text="Algorithm:").grid(row=2, column=0)
-algo_dropdown = ttk.Combobox(root, textvariable=algo_var,
-                             values=["None", "Douglas-Peucker", "SQUISH"])
+algo_dropdown = ttk.Combobox(
+    root, textvariable=algo_var, values=["None", "Douglas-Peucker", "SQUISH"]
+)
 algo_dropdown.grid(row=2, column=1)
 
 plot_button = tk.Button(root, text="Plot on Map", command=plot)
