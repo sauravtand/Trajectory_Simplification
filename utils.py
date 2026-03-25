@@ -3,20 +3,11 @@ import pandas as pd
 
 def read_plt(path, include_time=False):
     """
-    Read a Geolife .plt trajectory file.
+    Read a GeoLife .plt trajectory file.
 
-    Parameters
-    ----------
-    path : str
-        Path to the .plt file.
-    include_time : bool
-        If True, return (lat, lon, timestamp_seconds_from_start).
-        Otherwise return (lat, lon).
-
-    Returns
-    -------
-    list
-        List of tuples.
+    When include_time=True, return tuples in the form
+    (lat, lon, timestamp_seconds_from_start).
+    Otherwise return (lat, lon).
     """
     df = pd.read_csv(
         path,
@@ -37,21 +28,13 @@ def read_plt(path, include_time=False):
         errors="coerce",
     )
 
-    if len(dt) == 0 or dt.isna().all():
-        timestamps = [None] * len(df)
-    else:
-        valid_dt = dt.copy()
-        first_valid = valid_dt.dropna().iloc[0] if not valid_dt.dropna().empty else pd.NaT
-
-        if pd.isna(first_valid):
-            timestamps = [None] * len(df)
-        else:
-            # seconds from trajectory start
-            timestamps = []
-            for t in valid_dt:
-                if pd.isna(t):
-                    timestamps.append(None)
-                else:
-                    timestamps.append((t - first_valid).total_seconds())
+    timestamps = [None] * len(df)
+    valid = dt.dropna()
+    if not valid.empty:
+        start = valid.iloc[0]
+        timestamps = [
+            None if pd.isna(t) else float((t - start).total_seconds())
+            for t in dt
+        ]
 
     return list(zip(df["lat"], df["lon"], timestamps))
