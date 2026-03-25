@@ -1,7 +1,5 @@
-# main.py
-import os
 import math
-import hashlib
+import os
 import webbrowser
 import tkinter as tk
 from tkinter import ttk
@@ -9,256 +7,342 @@ from tkinter import ttk
 import folium
 from branca.element import MacroElement, Template
 
-from algorithms import rdp, squish
+from algorithms import simplify_all_algorithms, xy_to_latlon
 from utils import read_plt
 
 DATA_PATH = "data/geolife/Data"
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def color_for_name(name: str, palette: list[str]) -> str:
-    """
-    Deterministically pick a color from 'palette' based on 'name'.
-    Ensures the same file always gets the same color across runs.
-    """
-    h = int(hashlib.md5(name.encode("utf-8")).hexdigest(), 16)
-    return palette[h % len(palette)]
+ALGO_COLORS = {
+    "DP": "#1f77b4",
+    "SQUISH": "#ff7f0e",
+    "VW": "#2ca02c",
+    "SW": "#d62728",
+    "RW": "#9467bd",
+}
+
+ALGO_DISPLAY = {
+    "None": None,
+    "Douglas-Peucker": "DP",
+    "SQUISH": "SQUISH",
+    "Visvalingam-Whyatt": "VW",
+    "Sliding-Window": "SW",
+    "Reumann-Witkam": "RW",
+}
 
 
-# -----------------------------
-# Load users
-# -----------------------------
+# ============================================================
+# GUI SETUP
+# ============================================================
+
+root = tk.Tk()
+root.title("Trajectory Simplification Viewer")
+
+user_var = tk.StringVar()
+traj_var = tk.StringVar()
+algo_var = tk.StringVar(value="None")
+compare_var = tk.BooleanVar(value=False)
+
 try:
     users = sorted([u for u in os.listdir(DATA_PATH) if u.isdigit()])
 except FileNotFoundError:
     users = []
 
-# -----------------------------
-# Create window
-# -----------------------------
-root = tk.Tk()
-root.title("Simple Trajectory Viewer")
 
-# -----------------------------
-# Dropdowns
-# -----------------------------
-user_var = tk.StringVar()
-traj_var = tk.StringVar()
-algo_var = tk.StringVar(value="None")
-
+# ============================================================
+# HELPERS
+# ============================================================
 
 def load_trajectories(event=None):
     user = user_var.get()
     folder = os.path.join(DATA_PATH, user, "Trajectory")
+
     try:
         files = sorted([f for f in os.listdir(folder) if f.endswith(".plt")])
     except FileNotFoundError:
         files = []
+
     traj_dropdown["values"] = ["All"] + files
     traj_var.set("All")
 
 
+def add_points(points, group, color, radius=3, max_points=3000):
+    """
+    Draw point markers with downsampling for large trajectories.
+    """
+    if not points:
+        return
+
+    step = 1 if len(points) <= max_points else math.ceil(len(points) / max_points)
+
+    for i in range(0, len(points), step):
+        lat, lon = points[i]
+        folium.CircleMarker(
+            [lat, lon],
+            radius=radius,
+            color=color,
+            fill=True,
+            fill_opacity=1.0,
+        ).add_to(group)
+
+
+def build_metrics_table(metrics):
+    rows = ""
+    for name, m in metrics.items():
+        rows += (
+            f"<tr>"
+            f"<td>{name}</td>"
+            f"<td>{m['outliers_removed']}</td>"
+            f"<td>{m['kept_points']}</td>"
+            f"<td>{m['removed_points']}</td>"
+            f"<td>{m['sum']:.2f}</td>"
+            f"<td>{m['mean']:.2f}</td>"
+            f"<td>{m['rmse']:.2f}</td>"
+            f"<td>{m['max']:.2f}</td>"
+            f"<td>{m['length_ratio']:.3f}</td>"
+            f"<td>{m['runtime_ms']:.2f}</td>"
+            f"</tr>"
+        )
+
+    return f"""
+    <div style="font-size:13px; max-width:1000px; overflow:auto;">
+        <b>Comparison of Error Metrics</b><br>
+        <table border="1" style="border-collapse:collapse;">
+            <tr>
+                <th>Algorithm</th>
+                <th>Outliers Removed</th>
+                <th>Kept</th>
+                <th>Removed</th>
+                <th>Sum</th>
+                <th>Mean</th>
+                <th>RMSE</th>
+                <th>Max</th>
+                <th>Length Ratio</th>
+                <th>Runtime (ms)</th>
+            </tr>
+            {rows}
+        </table>
+    </div>
+    """
+
+
+def get_removed_kept_points(original_latlon, simplified_latlon):
+    """
+    Compare original and simplified points by rounded coordinate matching.
+    """
+    simplified_set = {(round(a, 7), round(b, 7)) for a, b in simplified_latlon}
+
+    removed = []
+    kept = []
+
+    for la, lo in original_latlon:
+        if (round(la, 7), round(lo, 7)) in simplified_set:
+            kept.append((la, lo))
+        else:
+            removed.append((la, lo))
+
+    return removed, kept
+
+
+# ============================================================
+# MAIN PLOT FUNCTION
+# ============================================================
+
 def plot():
     user = user_var.get()
     traj = traj_var.get()
-    algo = algo_var.get()
+    algo_choice = algo_var.get()
+    comparison_mode = compare_var.get()
 
     folder = os.path.join(DATA_PATH, user, "Trajectory")
+
     try:
         files = sorted([f for f in os.listdir(folder) if f.endswith(".plt")])
     except FileNotFoundError:
         files = []
 
-    # --- 1) Base map: CartoDB Positron (clean, English-like labels) ---
     m = folium.Map(
         tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-        attr="© OpenStreetMap contributors © CARTO",
+        attr="© OpenStreetMap © CARTO",
         zoom_start=12,
     )
-    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+
+    folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer(
         tiles="https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
         name="Stamen Toner",
-        attr="Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap",
-        overlay=False,
-        control=True,
+        attr="Map tiles © Stamen, Data © OSM",
     ).add_to(m)
     folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        tiles=(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+        ),
         name="Esri WorldGrayCanvas",
-        attr="Tiles © Esri — Esri, DeLorme, NAVTEQ",
-        overlay=False,
-        control=True,
+        attr="Tiles © Esri",
     ).add_to(m)
 
-    # --- 2) Prepare bounds for auto-zoom ---
-    global_min_lat, global_min_lon = +90.0, +180.0
-    global_max_lat, global_max_lon = -90.0, -180.0
+    fg_original = folium.FeatureGroup(name="Original", show=True).add_to(m)
+    fg_simpl_all = folium.FeatureGroup(name="Simplified Lines", show=True).add_to(m)
+    fg_removed = folium.FeatureGroup(name="Removed Points", show=True).add_to(m)
+    fg_kept = folium.FeatureGroup(name="Kept Points", show=True).add_to(m)
+
+    min_lat, min_lon = 90, 180
+    max_lat, max_lon = -90, -180
     any_drawn = False
-
-    # High-contrast color cycle for simplified trajectories
-    colors = [
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-        "#bcbd22", "#17becf",
-    ]
-
-    # Helper: add many points efficiently by sampling if needed
-    def add_points(points, group, color, radius=3, max_points=3000):
-        """
-        Add small circle markers for 'points' to 'group'.
-        If too many points, subsample to ~max_points for performance.
-        """
-        if not points:
-            return
-        n = len(points)
-        step = 1 if n <= max_points else math.ceil(n / max_points)
-        for i in range(0, n, step):
-            lat, lon = points[i]
-            folium.CircleMarker(
-                [lat, lon], radius=radius, color=color, fill=True, fill_opacity=1
-            ).add_to(group)
-
-    # Feature groups to toggle layers on/off
-    fg_original_lines = folium.FeatureGroup(name="Original Trajectory (line)", show=True).add_to(m)
-    fg_simplified_lines = folium.FeatureGroup(name="Simplified Trajectory (line)", show=True).add_to(m)
-    fg_removed_points = folium.FeatureGroup(name="Removed Points (red)", show=True).add_to(m)
-    fg_kept_points = folium.FeatureGroup(name="Kept Points (simplified vertices)", show=True).add_to(m)
-
-    # For dynamic legend: record which files were plotted and what color they used
-    plotted_color_by_file = {}  # filename -> color
 
     for f in files:
         if traj != "All" and f != traj:
             continue
 
-        # NOTE: read_plt returns [(lat, lon), ...] in (lat, lon) order for Folium
-        pts = read_plt(os.path.join(folder, f))
-        if not pts:
+        pts_with_time = read_plt(os.path.join(folder, f), include_time=True)
+        pts_latlon = [(lat, lon) for lat, lon, _ in pts_with_time]
+
+        if not pts_latlon:
             continue
 
         any_drawn = True
 
-        # Update bounds from ORIGINAL points
-        lats = [p[0] for p in pts]
-        lons = [p[1] for p in pts]
-        global_min_lat = min(global_min_lat, min(lats))
-        global_max_lat = max(global_max_lat, max(lats))
-        global_min_lon = min(global_min_lon, min(lons))
-        global_max_lon = max(global_max_lon, max(lons))
+        lats = [p[0] for p in pts_latlon]
+        lons = [p[1] for p in pts_latlon]
 
-        # Deterministic color based on filename
-        color = color_for_name(f, colors)
-        plotted_color_by_file[f] = color
+        min_lat = min(min_lat, min(lats))
+        max_lat = max(max_lat, max(lats))
+        min_lon = min(min_lon, min(lons))
+        max_lon = max(max_lon, max(lons))
 
-        # ----- ORIGINAL (thin, light gray line) -----
+        # Draw original trajectory
         folium.PolyLine(
-            pts,
+            pts_latlon,
             color="#bbbbbb",
             weight=2,
-            opacity=0.7,
-            tooltip=f"{f} (Original: {len(pts)} pts)",
-        ).add_to(fg_original_lines)
+            opacity=0.6,
+            tooltip=f"{f} (Original: {len(pts_latlon)} pts)",
+        ).add_to(fg_original)
 
-        # ----- SIMPLIFY -----
-        simplified = pts
-        if algo == "Douglas-Peucker":
-            simplified = rdp(pts, epsilon=0.0008)
-        elif algo == "SQUISH":
-            simplified = squish(pts, k=300)
+        # Run backend pipeline
+        cleaned_xy, results, metrics = simplify_all_algorithms(
+            pts_with_time,
+            removal_rate=0.50,
+        )
 
-        # ----- SPLIT POINTS: kept vs removed -----
-        # RDP and this SQUISH keep a subset of original vertices -> exact coordinate match works.
-        simplified_set = set((round(p[0], 10), round(p[1], 10)) for p in simplified)
+        if not cleaned_xy or not results:
+            continue
 
-        kept_points = []
-        removed_points = []
-        for p in pts:
-            key = (round(p[0], 10), round(p[1], 10))
-            if key in simplified_set:
-                kept_points.append(p)
-            else:
-                removed_points.append(p)
+        lat0 = pts_latlon[0][0]
 
-        # ----- SIMPLIFIED (bold, colored line) -----
-        reduction_pct = (1 - len(kept_points) / len(pts)) * 100 if len(pts) else 0.0
-        folium.PolyLine(
-            simplified,
-            color=color,
-            weight=5,
-            opacity=0.95,
-            tooltip=(
-                f"{f} (Simplified: {len(kept_points)} pts — "
-                f"Reduced {reduction_pct:.1f}%)"
-            ),
-        ).add_to(fg_simplified_lines)
+        if comparison_mode:
+            selected_algo = ALGO_DISPLAY[algo_choice]
 
-        # ----- POINTS -----
-        # Removed: red
-        add_points(removed_points, fg_removed_points, color="#d62728", radius=3)
-        # Kept: same color as simplified line
-        add_points(kept_points, fg_kept_points, color=color, radius=4)
+            for name, pts_xy_simpl in results.items():
+                simplified_latlon = [xy_to_latlon(x, y, lat0) for x, y in pts_xy_simpl]
 
-    # --- 3) Fit map to data or fallback view ---
-    if any_drawn and (global_min_lat < global_max_lat) and (global_min_lon < global_max_lon):
-        m.fit_bounds([[global_min_lat, global_min_lon], [global_max_lat, global_max_lon]])
+                folium.PolyLine(
+                    simplified_latlon,
+                    color=ALGO_COLORS[name],
+                    weight=4,
+                    opacity=0.9,
+                    tooltip=f"{name}: {len(simplified_latlon)} pts",
+                ).add_to(fg_simpl_all)
+
+                # Only show removed/kept markers for selected algorithm
+                if selected_algo == name:
+                    removed, kept = get_removed_kept_points(pts_latlon, simplified_latlon)
+                    add_points(removed, fg_removed, "#d62728", radius=3)
+                    add_points(kept, fg_kept, ALGO_COLORS[name], radius=4)
+
+            mid = len(pts_latlon) // 2
+            folium.Marker(
+                pts_latlon[mid],
+                popup=build_metrics_table(metrics),
+            ).add_to(m)
+
+        else:
+            algo_key = ALGO_DISPLAY[algo_choice]
+
+            if algo_key is None or algo_key not in results:
+                continue
+
+            simplified_latlon = [xy_to_latlon(x, y, lat0) for x, y in results[algo_key]]
+
+            folium.PolyLine(
+                simplified_latlon,
+                color=ALGO_COLORS[algo_key],
+                weight=5,
+                opacity=0.95,
+                tooltip=f"{algo_choice}: {len(simplified_latlon)} pts",
+            ).add_to(fg_simpl_all)
+
+            removed, kept = get_removed_kept_points(pts_latlon, simplified_latlon)
+            add_points(removed, fg_removed, "#d62728", radius=3)
+            add_points(kept, fg_kept, ALGO_COLORS[algo_key], radius=4)
+
+            err = metrics[algo_key]
+            html = f"""
+            <div style="font-size:13px;">
+                <b>Error Metrics ({algo_choice})</b><br>
+                Outliers Removed: {err['outliers_removed']}<br>
+                Kept Points: {err['kept_points']}<br>
+                Removed Points: {err['removed_points']}<br>
+                Sum Error: {err['sum']:.2f} m<br>
+                Mean Error: {err['mean']:.2f} m<br>
+                RMSE: {err['rmse']:.2f} m<br>
+                Max Error: {err['max']:.2f} m<br>
+                Length Ratio: {err['length_ratio']:.3f}<br>
+                Runtime: {err['runtime_ms']:.2f} ms<br>
+            </div>
+            """
+
+            mid = len(simplified_latlon) // 2
+            folium.Marker(simplified_latlon[mid], popup=html).add_to(m)
+
+    if any_drawn:
+        m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
     else:
-        # Fallback: world view if nothing drawn
-        m.location = [20.0, 0.0]
+        m.location = [20, 0]
         m.zoom_start = 2
 
-    # --- 4) Legend (top-left) – dynamic to match actual colors ---
-    if plotted_color_by_file:
-        items_html = "\n".join(
-            f'''<div>
-                   <span style="display:inline-block;width:14px;height:3px;background:{col};margin-right:6px;"></span>
-                   <span style="font-family:monospace;">{fname}</span>
-                 </div>'''
-            for fname, col in plotted_color_by_file.items()
-        )
-    else:
-        items_html = '<div style="color:#666;">No trajectories selected</div>'
-
-    # Clarify that kept points use the same color as the simplified line
-    legend_html = f"""
+    legend = f"""
     {{% macro html(this, kwargs) %}}
     <div style="
-        position: fixed; 
-        top: 10px; left: 10px; z-index: 1000;
-        background: rgba(255,255,255,0.92); 
-        padding: 10px 12px; 
-        border: 1px solid #ccc; 
-        border-radius: 6px; 
-        font-size: 12px;">
-      <div style="font-weight: 600; margin-bottom: 6px;">Legend</div>
-
-      <div style="margin-bottom:6px;">
-        <div><span style="display:inline-block;width:14px;height:3px;background:#bbbbbb;margin-right:6px;"></span> Original line</div>
-        <div style="margin-top:4px; font-weight:600;">Simplified line & kept points:</div>
-        {items_html}
-      </div>
-
-      <div><span style="display:inline-block;width:10px;height:10px;background:#d62728;border-radius:50%;display:inline-block;margin-right:6px;"></span> Removed points (red)</div>
-      <div style="margin-top:4px;color:#444;">Kept points use the <em>same color</em> as their simplified line.</div>
+        position:fixed;
+        top:10px;
+        left:10px;
+        z-index:9999;
+        background:white;
+        padding:10px;
+        border:1px solid #ccc;
+        border-radius:5px;
+        font-size:13px">
+        <b>Legend</b><br>
+        <span style="display:inline-block;width:14px;height:3px;background:#bbbbbb"></span>
+        Original<br>
+        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['DP']}"></span> DP<br>
+        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['SQUISH']}"></span> SQUISH<br>
+        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['VW']}"></span> VW<br>
+        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['SW']}"></span> SW<br>
+        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['RW']}"></span> RW<br>
+        <hr>
+        <span style="display:inline-block;width:10px;height:10px;background:#d62728;border-radius:50%"></span>
+        Removed Points<br>
+        Kept Points = same color as algorithm
     </div>
     {{% endmacro %}}
     """
+
     macro = MacroElement()
-    macro._template = Template(legend_html)
+    macro._template = Template(legend)
     m.get_root().add_child(macro)
 
-    # --- 5) Layer control (toggle lines/points) ---
-    folium.LayerControl(position="topright", collapsed=False).add_to(m)
+    folium.LayerControl().add_to(m)
 
-    # --- 6) Save & open ---
     m.save("map.html")
     webbrowser.open("map.html")
 
 
-# -----------------------------
-# UI Layout
-# -----------------------------
+# ============================================================
+# UI CONTROLS
+# ============================================================
+
 tk.Label(root, text="User:").grid(row=0, column=0)
 user_dropdown = ttk.Combobox(root, textvariable=user_var, values=users)
 user_dropdown.grid(row=0, column=1)
@@ -270,11 +354,27 @@ traj_dropdown.grid(row=1, column=1)
 
 tk.Label(root, text="Algorithm:").grid(row=2, column=0)
 algo_dropdown = ttk.Combobox(
-    root, textvariable=algo_var, values=["None", "Douglas-Peucker", "SQUISH"]
+    root,
+    textvariable=algo_var,
+    values=[
+        "None",
+        "Douglas-Peucker",
+        "SQUISH",
+        "Visvalingam-Whyatt",
+        "Sliding-Window",
+        "Reumann-Witkam",
+    ],
 )
 algo_dropdown.grid(row=2, column=1)
 
-plot_button = tk.Button(root, text="Plot on Map", command=plot)
-plot_button.grid(row=3, column=0, columnspan=2, pady=10)
+compare_box = tk.Checkbutton(
+    root,
+    text="Compare all algorithms (show error metrics)",
+    variable=compare_var,
+)
+compare_box.grid(row=3, column=0, columnspan=2)
+
+plot_btn = tk.Button(root, text="Plot", command=plot)
+plot_btn.grid(row=4, column=0, columnspan=2, pady=10)
 
 root.mainloop()
