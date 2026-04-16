@@ -1,6 +1,5 @@
 import math
 import os
-import sys
 import webbrowser
 import tkinter as tk
 from tkinter import ttk
@@ -8,48 +7,57 @@ from tkinter import ttk
 import folium
 from branca.element import Element, MacroElement, Template
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
-
 from algorithms import simplify_all_algorithms, xy_to_latlon
 from utils import read_plt
 
-DATA_PATH = os.path.join(BASE_DIR, "data", "geolife", "Data")
+DATA_PATH = "data/geolife/Data"
 
 ALGO_COLORS = {
-    "DP_ORIG": "#4c78a8",
     "DP": "#1f77b4",
     "SQUISH": "#ff7f0e",
     "VW": "#2ca02c",
-    "SW": "#17a2b8",
+    "SW": "#2ca",
     "RW": "#9467bd",
-}
-
-ALGO_LABELS = {
-    "DP_ORIG": "Douglas-Peucker (Original)",
-    "DP": "Douglas-Peucker (Improved)",
-    "SQUISH": "SQUISH",
-    "VW": "Visvalingam-Whyatt",
-    "SW": "Sliding-Window",
-    "RW": "Reumann-Witkam",
 }
 
 ALGO_DISPLAY = {
     "None": None,
-    "Douglas-Peucker (Original)": "DP_ORIG",
-    "Douglas-Peucker (Improved)": "DP",
+    "Douglas-Peucker": "DP",
     "Visvalingam-Whyatt": "VW",
     "Sliding-Window": "SW",
     "Reumann-Witkam": "RW",
     "SQUISH": "SQUISH",
 }
 
+root = tk.Tk()
+root.title("Trajectory Simplification Viewer")
+
+user_var = tk.StringVar()
+traj_var = tk.StringVar()
+algo_var = tk.StringVar(value="None")
+compare_var = tk.BooleanVar(value=False)
+
+try:
+    users = sorted([u for u in os.listdir(DATA_PATH) if u.isdigit()])
+except FileNotFoundError:
+    users = []
+
+
+def load_trajectories(event=None):
+    user = user_var.get()
+    folder = os.path.join(DATA_PATH, user, "Trajectory")
+    try:
+        files = sorted([f for f in os.listdir(folder) if f.endswith(".plt")])
+    except FileNotFoundError:
+        files = []
+
+    traj_dropdown["values"] = ["All"] + files
+    traj_var.set("All")
+
 
 def add_points(points, group, color, radius=3, max_points=3000):
     if not points:
         return
-
     step = 1 if len(points) <= max_points else math.ceil(len(points) / max_points)
     for i in range(0, len(points), step):
         lat, lon = points[i]
@@ -58,9 +66,7 @@ def add_points(points, group, color, radius=3, max_points=3000):
             radius=radius,
             color=color,
             fill=True,
-            fill_color=color,
             fill_opacity=1.0,
-            weight=1,
         ).add_to(group)
 
 
@@ -88,22 +94,10 @@ def build_single_metrics_card(algo_label, algo_key, metric, source_name):
         _metric_row("Outliers Removed", metric.get("outliers_removed", 0)),
         _metric_row("Kept Points", metric.get("kept_points", 0)),
         _metric_row("Removed Points", metric.get("removed_points", 0)),
-        _metric_row(
-            "PED max / mean / rmse",
-            f"{fmt(metric.get('PED_max'))} / {fmt(metric.get('PED_mean'))} / {fmt(metric.get('PED_rmse'))}",
-        ),
-        _metric_row(
-            "SED max / mean / rmse",
-            f"{fmt(metric.get('SED_max'))} / {fmt(metric.get('SED_mean'))} / {fmt(metric.get('SED_rmse'))}",
-        ),
-        _metric_row(
-            "DAD max / mean",
-            f"{fmt(metric.get('DAD_max_deg'))}° / {fmt(metric.get('DAD_mean_deg'))}°",
-        ),
-        _metric_row(
-            "SAD max / mean",
-            f"{fmt(metric.get('SAD_max'))} / {fmt(metric.get('SAD_mean'))}",
-        ),
+        _metric_row("PED max / mean / rmse", f"{fmt(metric.get('PED_max'))} / {fmt(metric.get('PED_mean'))} / {fmt(metric.get('PED_rmse'))}"),
+        _metric_row("SED max / mean / rmse", f"{fmt(metric.get('SED_max'))} / {fmt(metric.get('SED_mean'))} / {fmt(metric.get('SED_rmse'))}"),
+        _metric_row("DAD max / mean", f"{fmt(metric.get('DAD_max_deg'))}° / {fmt(metric.get('DAD_mean_deg'))}°"),
+        _metric_row("SAD max / mean", f"{fmt(metric.get('SAD_max'))} / {fmt(metric.get('SAD_mean'))}"),
         _metric_row("ISSD", fmt(metric.get("ISSD"))),
         _metric_row("Length Ratio", fmt(metric.get("length_ratio"), 3)),
         _metric_row("Runtime", f"{fmt(metric.get('runtime_ms'))} ms"),
@@ -129,15 +123,12 @@ def build_single_metrics_card(algo_label, algo_key, metric, source_name):
 
 def build_comparison_cards(metrics, source_name):
     cards = []
-    algo_order = ["DP_ORIG", "DP", "SQUISH", "VW", "SW", "RW"]
+    algo_order = ["DP", "SQUISH", "VW", "SW", "RW"]
 
     for name in algo_order:
         if name not in metrics:
             continue
-
         m = metrics[name]
-        display_name = ALGO_LABELS.get(name, name)
-
         cards.append(f"""
         <div style="
             background:white;
@@ -151,7 +142,7 @@ def build_comparison_cards(metrics, source_name):
             line-height:1.3;
         ">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                <div style="font-size:14px;font-weight:700;color:#222;">{display_name}</div>
+                <div style="font-size:14px;font-weight:700;color:#222;">{name}</div>
                 <div style="font-size:11px;color:#666;">{source_name}</div>
             </div>
             {_metric_row('Outliers', m.get('outliers_removed', 0))}
@@ -186,8 +177,8 @@ def add_sidebar_panel(m, html_content):
         position: fixed;
         bottom: 12px;
         left: 12px;
-        width: 280px;
-        max-height: 42vh;
+        width: 260px;
+        max-height: 40vh;
         overflow-y: auto;
         z-index: 9998;
         padding-right: 4px;
@@ -202,37 +193,19 @@ def get_removed_kept_points(original_latlon, simplified_latlon):
     simplified_set = {(round(a, 7), round(b, 7)) for a, b in simplified_latlon}
     removed = []
     kept = []
-
     for la, lo in original_latlon:
         if (round(la, 7), round(lo, 7)) in simplified_set:
             kept.append((la, lo))
         else:
             removed.append((la, lo))
-
     return removed, kept
 
 
-def load_trajectories(user_var, traj_var, traj_dropdown, _event=None):
-    user = user_var.get().strip()
-    folder = os.path.join(DATA_PATH, user, "Trajectory")
-
-    try:
-        files = sorted([f for f in os.listdir(folder) if f.endswith(".plt")])
-    except FileNotFoundError:
-        files = []
-
-    traj_dropdown["values"] = ["All"] + files
-    traj_var.set("All")
-
-
-def plot(user_var, traj_var, algo_var, compare_var):
-    user = user_var.get().strip()
-    traj = traj_var.get().strip()
-    algo_choice = algo_var.get().strip()
+def plot():
+    user = user_var.get()
+    traj = traj_var.get()
+    algo_choice = algo_var.get()
     comparison_mode = compare_var.get()
-
-    if not user:
-        return
 
     folder = os.path.join(DATA_PATH, user, "Trajectory")
     try:
@@ -245,7 +218,6 @@ def plot(user_var, traj_var, algo_var, compare_var):
         attr="© OpenStreetMap © CARTO",
         zoom_start=12,
     )
-
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer(
         tiles="https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
@@ -275,10 +247,8 @@ def plot(user_var, traj_var, algo_var, compare_var):
         if traj != "All" and f != traj:
             continue
 
-        file_path = os.path.join(folder, f)
-        pts_with_time = read_plt(file_path, include_time=True)
+        pts_with_time = read_plt(os.path.join(folder, f), include_time=True)
         pts_latlon = [(lat, lon) for lat, lon, _ in pts_with_time]
-
         if not pts_latlon:
             continue
 
@@ -294,7 +264,7 @@ def plot(user_var, traj_var, algo_var, compare_var):
             pts_latlon,
             color="#bbbbbb",
             weight=2,
-            opacity=0.65,
+            opacity=0.6,
             tooltip=f"{f} (Original: {len(pts_latlon)} pts)",
         ).add_to(fg_original)
 
@@ -305,36 +275,33 @@ def plot(user_var, traj_var, algo_var, compare_var):
         lat0 = pts_latlon[0][0]
 
         if comparison_mode:
-            selected_algo = ALGO_DISPLAY.get(algo_choice)
-
+            selected_algo = ALGO_DISPLAY[algo_choice]
             for name, pts_xy_simpl in results.items():
                 simplified_latlon = [xy_to_latlon(x, y, lat0) for x, y in pts_xy_simpl]
-
                 folium.PolyLine(
                     simplified_latlon,
-                    color=ALGO_COLORS.get(name, "#333333"),
+                    color=ALGO_COLORS[name],
                     weight=4,
                     opacity=0.9,
-                    tooltip=f"{ALGO_LABELS.get(name, name)}: {len(simplified_latlon)} pts",
+                    tooltip=f"{name}: {len(simplified_latlon)} pts",
                 ).add_to(fg_simpl_all)
 
                 if selected_algo == name:
                     removed, kept = get_removed_kept_points(pts_latlon, simplified_latlon)
                     add_points(removed, fg_removed, "#d62728", radius=3)
-                    add_points(kept, fg_kept, ALGO_COLORS.get(name, "#333333"), radius=4)
+                    add_points(kept, fg_kept, ALGO_COLORS[name], radius=4)
 
             sidebar_sections.append(build_comparison_cards(metrics, f))
 
         else:
-            algo_key = ALGO_DISPLAY.get(algo_choice)
+            algo_key = ALGO_DISPLAY[algo_choice]
             if algo_key is None or algo_key not in results:
                 continue
 
             simplified_latlon = [xy_to_latlon(x, y, lat0) for x, y in results[algo_key]]
-
             folium.PolyLine(
                 simplified_latlon,
-                color=ALGO_COLORS.get(algo_key, "#333333"),
+                color=ALGO_COLORS[algo_key],
                 weight=5,
                 opacity=0.95,
                 tooltip=f"{algo_choice}: {len(simplified_latlon)} pts",
@@ -342,14 +309,11 @@ def plot(user_var, traj_var, algo_var, compare_var):
 
             removed, kept = get_removed_kept_points(pts_latlon, simplified_latlon)
             add_points(removed, fg_removed, "#d62728", radius=3)
-            add_points(kept, fg_kept, ALGO_COLORS.get(algo_key, "#333333"), radius=4)
-
-            sidebar_sections.append(
-                build_single_metrics_card(algo_choice, algo_key, metrics[algo_key], f)
-            )
+            add_points(kept, fg_kept, ALGO_COLORS[algo_key], radius=4)
+            sidebar_sections.append(build_single_metrics_card(algo_choice, algo_key, metrics[algo_key], f))
 
     if sidebar_sections:
-        add_sidebar_panel(m, "".join(sidebar_sections))
+        add_sidebar_panel(m, ''.join(sidebar_sections))
 
     if any_drawn:
         m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
@@ -365,16 +329,13 @@ def plot(user_var, traj_var, algo_var, compare_var):
         left:10px;
         z-index:9999;
         background:white;
-        padding:10px 12px;
+        padding:10px;
         border:1px solid #ccc;
-        border-radius:8px;
-        font-size:13px;
-        box-shadow:0 2px 10px rgba(0,0,0,0.12);
-    ">
+        border-radius:5px;
+        font-size:13px">
         <b>Legend</b><br>
         <span style="display:inline-block;width:14px;height:3px;background:#bbbbbb"></span> Original<br>
-        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['DP_ORIG']}"></span> DP Original<br>
-        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['DP']}"></span> DP Improved<br>
+        <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['DP']}"></span> DP<br>
         <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['SQUISH']}"></span> SQUISH<br>
         <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['VW']}"></span> VW<br>
         <span style="display:inline-block;width:14px;height:3px;background:{ALGO_COLORS['SW']}"></span> SW<br>
@@ -392,91 +353,42 @@ def plot(user_var, traj_var, algo_var, compare_var):
     m.get_root().add_child(macro)
 
     folium.LayerControl().add_to(m)
-    output_path = os.path.join(BASE_DIR, "map.html")
-    m.save(output_path)
-    webbrowser.open(output_path)
+    m.save("map.html")
+    webbrowser.open("map.html")
 
 
-def create_app():
-    root = tk.Tk()
-    root.title("Trajectory Simplification Viewer")
-    root.geometry("430x230")
-    root.minsize(430, 230)
+tk.Label(root, text="User:").grid(row=0, column=0)
+user_dropdown = ttk.Combobox(root, textvariable=user_var, values=users)
+user_dropdown.grid(row=0, column=1)
+user_dropdown.bind("<<ComboboxSelected>>", load_trajectories)
 
-    main_frame = ttk.Frame(root, padding=14)
-    main_frame.grid(row=0, column=0, sticky="nsew")
+tk.Label(root, text="Trajectory:").grid(row=1, column=0)
+traj_dropdown = ttk.Combobox(root, textvariable=traj_var, values=["All"])
+traj_dropdown.grid(row=1, column=1)
 
-    root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=1)
-    main_frame.columnconfigure(1, weight=1)
+tk.Label(root, text="Algorithm:").grid(row=2, column=0)
+algo_dropdown = ttk.Combobox(
+    root,
+    textvariable=algo_var,
+    values=[
+        "None",
+        "Douglas-Peucker",
+        "SQUISH",
+        "Visvalingam-Whyatt",
+        "Sliding-Window",
+        "Reumann-Witkam",
+    ],
+)
+algo_dropdown.grid(row=2, column=1)
 
-    style = ttk.Style()
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
+compare_box = tk.Checkbutton(
+    root,
+    text="Compare all algorithms (show error metrics)",
+    variable=compare_var,
+)
+compare_box.grid(row=3, column=0, columnspan=2)
 
-    style.configure("TLabel", font=("Segoe UI", 10))
-    style.configure("TCheckbutton", font=("Segoe UI", 10))
-    style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=6)
-    style.configure("TCombobox", padding=4)
+plot_btn = tk.Button(root, text="Plot", command=plot)
+plot_btn.grid(row=4, column=0, columnspan=2, pady=10)
 
-    user_var = tk.StringVar()
-    traj_var = tk.StringVar(value="All")
-    algo_var = tk.StringVar(value="None")
-    compare_var = tk.BooleanVar(value=False)
-
-    try:
-        users = sorted([u for u in os.listdir(DATA_PATH) if u.isdigit()])
-    except FileNotFoundError:
-        users = []
-
-    ttk.Label(main_frame, text="User:").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=6)
-    user_dropdown = ttk.Combobox(main_frame, textvariable=user_var, values=users, state="readonly")
-    user_dropdown.grid(row=0, column=1, sticky="ew", pady=6)
-    user_dropdown.bind(
-        "<<ComboboxSelected>>",
-        lambda event: load_trajectories(user_var, traj_var, traj_dropdown, event),
-    )
-
-    ttk.Label(main_frame, text="Trajectory:").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=6)
-    traj_dropdown = ttk.Combobox(main_frame, textvariable=traj_var, values=["All"], state="readonly")
-    traj_dropdown.grid(row=1, column=1, sticky="ew", pady=6)
-
-    ttk.Label(main_frame, text="Algorithm:").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=6)
-    algo_dropdown = ttk.Combobox(
-        main_frame,
-        textvariable=algo_var,
-        state="readonly",
-        values=[
-            "None",
-            "Douglas-Peucker (Original)",
-            "Douglas-Peucker (Improved)",
-            "SQUISH",
-            "Visvalingam-Whyatt",
-            "Sliding-Window",
-            "Reumann-Witkam",
-        ],
-    )
-    algo_dropdown.grid(row=2, column=1, sticky="ew", pady=6)
-
-    compare_box = ttk.Checkbutton(
-        main_frame,
-        text="Compare all algorithms (show error metrics)",
-        variable=compare_var,
-    )
-    compare_box.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 6))
-
-    plot_btn = ttk.Button(
-        main_frame,
-        text="Plot Trajectory",
-        command=lambda: plot(user_var, traj_var, algo_var, compare_var),
-    )
-    plot_btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-
-    return root
-
-
-if __name__ == "__main__":
-    app = create_app()
-    app.mainloop()
+root.mainloop()

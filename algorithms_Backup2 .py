@@ -5,7 +5,6 @@ import time
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 EARTH_RADIUS = 6_371_000
-EPS = 1e-12
 
 PointXY = Tuple[float, float]
 PointXYT = Tuple[float, float, Optional[float]]
@@ -40,6 +39,10 @@ def point_distance(a: PointXY, b: PointXY) -> float:
     return math.dist(a, b)
 
 
+def segment_length(a: PointXY, b: PointXY) -> float:
+    return point_distance(a, b)
+
+
 def path_length(points: Sequence[PointXY]) -> float:
     if len(points) < 2:
         return 0.0
@@ -49,18 +52,15 @@ def path_length(points: Sequence[PointXY]) -> float:
 def point_to_segment_distance(p: PointXY, a: PointXY, b: PointXY) -> float:
     if a == b:
         return point_distance(p, a)
-
     ax, ay = a
     bx, by = b
     px, py = p
-
     abx = bx - ax
     aby = by - ay
     apx = px - ax
     apy = py - ay
     ab2 = abx * abx + aby * aby
-
-    t = max(0.0, min(1.0, (apx * abx + apy * aby) / max(ab2, EPS)))
+    t = max(0.0, min(1.0, (apx * abx + apy * aby) / max(ab2, 1e-12)))
     proj = (ax + t * abx, ay + t * aby)
     return point_distance(p, proj)
 
@@ -68,13 +68,12 @@ def point_to_segment_distance(p: PointXY, a: PointXY, b: PointXY) -> float:
 def perpendicular_distance(p: PointXY, a: PointXY, b: PointXY) -> float:
     if a == b:
         return point_distance(p, a)
-
     x, y = p
     x1, y1 = a
     x2, y2 = b
     num = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1)
     den = point_distance(a, b)
-    return num / max(den, EPS)
+    return num / max(den, 1e-12)
 
 
 def triangle_area(a: PointXY, b: PointXY, c: PointXY) -> float:
@@ -104,237 +103,42 @@ def angle_diff_rad(a1: float, a2: float) -> float:
 def local_turn_angle(points: Sequence[PointXY], i: int) -> float:
     if i <= 0 or i >= len(points) - 1:
         return math.pi
-
     ax, ay = points[i - 1]
     bx, by = points[i]
     cx, cy = points[i + 1]
-
     v1 = (ax - bx, ay - by)
     v2 = (cx - bx, cy - by)
-
     n1 = math.hypot(*v1)
     n2 = math.hypot(*v2)
-    if n1 == 0.0 or n2 == 0.0:
+    if n1 == 0 or n2 == 0:
         return 0.0
-
     cosang = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
     return math.acos(cosang)
 
 
-def prefix_sums(values: Sequence[float]) -> List[float]:
-    out = [0.0]
-    s = 0.0
-    for v in values:
-        s += v
-        out.append(s)
-    return out
-
-
-def range_mean(prefix: Sequence[float], left: int, right: int) -> float:
-    count = right - left
-    if count <= 0:
-        return 0.0
-    return (prefix[right] - prefix[left]) / count
-
-
-def exact_target_indices(
-    indices: Iterable[int],
-    n: int,
-    target_k: int,
-    points: Sequence[PointXY],
-    turn_dev: Optional[Sequence[float]] = None,
-    motion_score: Optional[Sequence[float]] = None,
-) -> List[int]:
-    idx = set(int(i) for i in indices)
+def exact_target_indices(indices: Iterable[int], n: int, target_k: int, points: Sequence[PointXY]) -> List[int]:
+    idx = {int(i) for i in indices}
     idx.add(0)
     idx.add(n - 1)
 
     if target_k >= n:
         return list(range(n))
 
-    if turn_dev is None:
-        turn_dev = [0.0] * n
-        for i in range(1, n - 1):
-            turn_dev[i] = abs(math.pi - local_turn_angle(points, i))
-
-    if motion_score is None:
-        motion_score = turn_dev
-
     if len(idx) > target_k:
         removable = [i for i in idx if i not in {0, n - 1}]
-        removable.sort(key=lambda i: (motion_score[i], turn_dev[i], i))
+        removable.sort(key=lambda i: (local_turn_angle(points, i), i))
         idx -= set(removable[: len(idx) - target_k])
     elif len(idx) < target_k:
         candidates = [i for i in range(1, n - 1) if i not in idx]
-        candidates.sort(key=lambda i: (-motion_score[i], -turn_dev[i], i))
+        candidates.sort(key=lambda i: (-local_turn_angle(points, i), i))
         idx.update(candidates[: target_k - len(idx)])
 
     return sorted(idx)
 
 
 # ============================================================
-# 3. PRECOMPUTED FEATURES
+# 3. OUTLIER REMOVAL (TIME + DISTANCE)
 # ============================================================
-
-def build_motion_features(points: Sequence[PointXY], times: Sequence[Optional[float]]) -> Dict[str, List[float]]:
-    n = len(points)
-    turn_dev = [0.0] * n
-    seg_dist = [0.0] * max(0, n - 1)
-    seg_dt = [0.0] * max(0, n - 1)
-    seg_speed = [0.0] * max(0, n - 1)
-    speed_change = [0.0] * n
-    accel_change = [0.0] * n
-    gap_irregularity = [0.0] * n
-    zigzag_score = [0.0] * n
-
-    for i in range(1, n):
-        d = point_distance(points[i - 1], points[i])
-        seg_dist[i - 1] = d
-        ti = times[i - 1]
-        tj = times[i]
-        if ti is not None and tj is not None:
-            dt = tj - ti
-            if dt > 0:
-                seg_dt[i - 1] = dt
-                seg_speed[i - 1] = d / dt
-
-    for i in range(1, n - 1):
-        turn_dev[i] = abs(math.pi - local_turn_angle(points, i))
-
-        v1 = seg_speed[i - 1]
-        v2 = seg_speed[i]
-        if v1 > 0.0 and v2 > 0.0:
-            speed_change[i] = abs(v2 - v1)
-
-        dt1 = seg_dt[i - 1]
-        dt2 = seg_dt[i]
-        if dt1 > 0.0 and dt2 > 0.0:
-            gap_irregularity[i] = abs(dt2 - dt1) / max(dt1, dt2, EPS)
-            a1 = v1 / max(dt1, EPS) if v1 > 0.0 else 0.0
-            a2 = v2 / max(dt2, EPS) if v2 > 0.0 else 0.0
-            accel_change[i] = abs(a2 - a1)
-
-        if 1 <= i < n - 1:
-            a1 = angle_of_segment(points[i - 1], points[i])
-            a2 = angle_of_segment(points[i], points[i + 1])
-            zigzag_score[i] = angle_diff_rad(a1, a2)
-
-    motion_score = [
-        2.0 * turn_dev[i] + 0.12 * speed_change[i] + 0.08 * accel_change[i] + 0.40 * gap_irregularity[i]
-        for i in range(n)
-    ]
-
-    return {
-        "turn_dev": turn_dev,
-        "seg_dist": seg_dist,
-        "seg_dt": seg_dt,
-        "seg_speed": seg_speed,
-        "speed_change": speed_change,
-        "accel_change": accel_change,
-        "gap_irregularity": gap_irregularity,
-        "zigzag_score": zigzag_score,
-        "motion_score": motion_score,
-        "turn_prefix": prefix_sums(turn_dev),
-        "speed_change_prefix": prefix_sums(speed_change),
-        "accel_change_prefix": prefix_sums(accel_change),
-        "gap_irregularity_prefix": prefix_sums(gap_irregularity),
-        "motion_prefix": prefix_sums(motion_score),
-    }
-
-
-# ============================================================
-# 4. OUTLIER REMOVAL
-# ============================================================
-
-def _remove_outliers_single_pass(
-    points_xy: Sequence[PointXY],
-    times: Sequence[Optional[float]],
-    max_speed_mps: float,
-    spike_ratio: float,
-    bridge_ratio: float,
-    z_thresh: float,
-    turn_thresh_deg: float,
-    stop_speed_mps: float,
-    accel_ratio: float,
-    zigzag_turn_deg: float,
-):
-    n = len(points_xy)
-    if n < 3:
-        return list(points_xy), list(times), 0
-
-    features = build_motion_features(points_xy, times)
-    jumps = features["seg_dist"]
-    turn_dev = features["turn_dev"]
-    seg_speed = features["seg_speed"]
-    seg_dt = features["seg_dt"]
-    speed_change = features["speed_change"]
-    zigzag_score = features["zigzag_score"]
-
-    med_jump = statistics.median(jumps) if jumps else 0.0
-    mad_jump = median_absolute_deviation(jumps)
-    robust_scale = max(1.4826 * mad_jump, EPS)
-    turn_limit = math.radians(turn_thresh_deg)
-    zigzag_limit = math.radians(zigzag_turn_deg)
-
-    keep = [True] * n
-    keep[0] = True
-    keep[-1] = True
-
-    for i in range(1, n - 1):
-        d1 = jumps[i - 1]
-        d2 = jumps[i]
-        d_bridge = point_distance(points_xy[i - 1], points_xy[i + 1])
-
-        dt1 = seg_dt[i - 1]
-        dt2 = seg_dt[i]
-        v1 = seg_speed[i - 1]
-        v2 = seg_speed[i]
-
-        is_real_turn = turn_dev[i] > turn_limit
-        is_stop_like = v1 > 0.0 and v2 > 0.0 and v1 < stop_speed_mps and v2 < stop_speed_mps
-
-        invalid_time = (times[i - 1] is not None and times[i] is not None and dt1 <= 0.0) or (
-            times[i] is not None and times[i + 1] is not None and dt2 <= 0.0
-        )
-
-        fast_spike = (
-            v1 > max_speed_mps and
-            v2 > max_speed_mps and
-            d_bridge < bridge_ratio * max(d1 + d2, EPS)
-        )
-
-        sharp_return = (
-            d1 > spike_ratio * max(d_bridge, 1.0) and
-            d2 > spike_ratio * max(d_bridge, 1.0)
-        )
-
-        z1 = abs(d1 - med_jump) / robust_scale
-        z2 = abs(d2 - med_jump) / robust_scale
-        robust_spike = (
-            z1 > z_thresh and
-            z2 > z_thresh and
-            d_bridge < bridge_ratio * max(d1 + d2, EPS)
-        )
-
-        unrealistic_speed_change = False
-        if v1 > 0.0 and v2 > 0.0:
-            ratio = max(v1, v2) / max(min(v1, v2), EPS)
-            unrealistic_speed_change = ratio >= accel_ratio and speed_change[i] > max_speed_mps * 0.30
-
-        zigzag_noise = (
-            zigzag_score[i] > zigzag_limit and
-            d_bridge < 0.35 * max(d1 + d2, EPS) and
-            not is_real_turn
-        )
-
-        if (invalid_time or fast_spike or sharp_return or robust_spike or unrealistic_speed_change or zigzag_noise) and not is_stop_like and not is_real_turn:
-            keep[i] = False
-
-    cleaned_points = [p for p, ok in zip(points_xy, keep) if ok]
-    cleaned_times = [t for t, ok in zip(times, keep) if ok]
-    removed = n - len(cleaned_points)
-    return cleaned_points, cleaned_times, removed
-
 
 def remove_outliers_time_distance(
     points_xy: Sequence[PointXY],
@@ -343,87 +147,108 @@ def remove_outliers_time_distance(
     spike_ratio: float = 4.0,
     bridge_ratio: float = 0.25,
     z_thresh: float = 3.5,
-    turn_thresh_deg: float = 25.0,
-    stop_speed_mps: float = 1.0,
-    accel_ratio: float = 6.0,
-    zigzag_turn_deg: float = 165.0,
-    max_passes: int = 3,
 ):
-    curr_points = list(points_xy)
-    curr_times = list(times)
-    total_removed = 0
+    n = len(points_xy)
+    if n < 3:
+        return list(points_xy), list(times), {"removed": 0, "input": n, "output": n}
 
-    for _ in range(max_passes):
-        new_points, new_times, removed = _remove_outliers_single_pass(
-            curr_points,
-            curr_times,
-            max_speed_mps=max_speed_mps,
-            spike_ratio=spike_ratio,
-            bridge_ratio=bridge_ratio,
-            z_thresh=z_thresh,
-            turn_thresh_deg=turn_thresh_deg,
-            stop_speed_mps=stop_speed_mps,
-            accel_ratio=accel_ratio,
-            zigzag_turn_deg=zigzag_turn_deg,
+    jumps = [point_distance(points_xy[i - 1], points_xy[i]) for i in range(1, n)]
+    med_jump = statistics.median(jumps) if jumps else 0.0
+    mad_jump = median_absolute_deviation(jumps)
+    robust_scale = max(1.4826 * mad_jump, 1e-9)
+
+    keep = [True] * n
+    keep[0] = True
+    keep[-1] = True
+
+    for i in range(1, n - 1):
+        prev_p = points_xy[i - 1]
+        curr_p = points_xy[i]
+        next_p = points_xy[i + 1]
+
+        d1 = point_distance(prev_p, curr_p)
+        d2 = point_distance(curr_p, next_p)
+        d_bridge = point_distance(prev_p, next_p)
+
+        t_prev = times[i - 1]
+        t_curr = times[i]
+        t_next = times[i + 1]
+        has_time = t_prev is not None and t_curr is not None and t_next is not None
+
+        temporal_spike = False
+        if has_time:
+            dt1 = t_curr - t_prev
+            dt2 = t_next - t_curr
+            if dt1 <= 0 or dt2 <= 0:
+                temporal_spike = True
+            else:
+                v1 = d1 / dt1
+                v2 = d2 / dt2
+                fast_spike = (
+                    v1 > max_speed_mps and
+                    v2 > max_speed_mps and
+                    d_bridge < bridge_ratio * max(d1 + d2, 1e-9)
+                )
+                sharp_return = (
+                    d1 > spike_ratio * max(d_bridge, 1.0) and
+                    d2 > spike_ratio * max(d_bridge, 1.0)
+                )
+                temporal_spike = fast_spike or sharp_return
+
+        z1 = abs(d1 - med_jump) / robust_scale
+        z2 = abs(d2 - med_jump) / robust_scale
+        robust_spike = (
+            z1 > z_thresh and
+            z2 > z_thresh and
+            d_bridge < bridge_ratio * max(d1 + d2, 1e-9)
         )
-        total_removed += removed
-        curr_points, curr_times = new_points, new_times
-        if removed == 0 or len(curr_points) < 3:
-            break
 
-    return curr_points, curr_times, {
-        "removed": total_removed,
-        "input": len(points_xy),
-        "output": len(curr_points),
+        if temporal_spike or robust_spike:
+            keep[i] = False
+
+    cleaned_points = [p for p, ok in zip(points_xy, keep) if ok]
+    cleaned_times = [t for t, ok in zip(times, keep) if ok]
+    return cleaned_points, cleaned_times, {
+        "removed": n - len(cleaned_points),
+        "input": n,
+        "output": len(cleaned_points),
     }
 
 
 # ============================================================
-# 5. SIMPLIFICATION METHODS
+# 4. CLASSICAL SIMPLIFICATION METHODS
 # ============================================================
 
-def _dp_keep(points: Sequence[PointXY], start: int, end: int, eps: float, kept: set):
-    stack = [(start, end)]
-    while stack:
-        s, e = stack.pop()
-        if e <= s + 1:
-            continue
-
-        a = points[s]
-        b = points[e]
-        max_dist = -1.0
-        split_idx = -1
-
-        for i in range(s + 1, e):
-            d = perpendicular_distance(points[i], a, b)
-            if d > max_dist:
-                max_dist = d
-                split_idx = i
-
-        if split_idx != -1 and max_dist > eps:
-            kept.add(split_idx)
-            stack.append((s, split_idx))
-            stack.append((split_idx, e))
+def _dp_keep(points: Sequence[PointXY], start: int, end: int, eps: float, kept: set[int]) -> None:
+    if end <= start + 1:
+        return
+    max_dist = -1.0
+    split_idx: Optional[int] = None
+    a = points[start]
+    b = points[end]
+    for i in range(start + 1, end):
+        d = perpendicular_distance(points[i], a, b)
+        if d > max_dist:
+            max_dist = d
+            split_idx = i
+    if split_idx is not None and max_dist > eps:
+        kept.add(split_idx)
+        _dp_keep(points, start, split_idx, eps, kept)
+        _dp_keep(points, split_idx, end, eps, kept)
 
 
 def simpl_dp_indices_original(points: Sequence[PointXY], target_k: int) -> List[int]:
-    n = len(points)
-    if n <= target_k:
-        return list(range(n))
-
-    turn_dev = [0.0] * n
-    for i in range(1, n - 1):
-        turn_dev[i] = abs(math.pi - local_turn_angle(points, i))
+    if len(points) <= target_k:
+        return list(range(len(points)))
 
     def run(eps: float) -> List[int]:
-        kept = {0, n - 1}
-        _dp_keep(points, 0, n - 1, eps, kept)
+        kept = {0, len(points) - 1}
+        _dp_keep(points, 0, len(points) - 1, eps, kept)
         return sorted(kept)
 
     lo, hi = 0.0, max(path_length(points), 1.0)
-    best = list(range(n))
-
-    for _ in range(28):
+    best = list(range(len(points)))
+    for _ in range(32):
         mid = (lo + hi) / 2.0
         idx = run(mid)
         if len(idx) > target_k:
@@ -431,109 +256,19 @@ def simpl_dp_indices_original(points: Sequence[PointXY], target_k: int) -> List[
         else:
             best = idx
             hi = mid
-
-    return exact_target_indices(best, n, target_k, points, turn_dev, turn_dev)
-
-
-def _segment_complexity(feature_prefix: Sequence[float], start: int, end: int) -> float:
-    if end <= start + 1:
-        return 0.0
-    return range_mean(feature_prefix, start + 1, end)
+    return exact_target_indices(best, len(points), target_k, points)
 
 
-def _dp_keep_improved(
+def simpl_dp_indices(
     points: Sequence[PointXY],
-    base_eps: float,
-    kept: set,
-    features: Dict[str, List[float]],
-):
-    n = len(points)
-    turn_dev = features["turn_dev"]
-    speed_change = features["speed_change"]
-    accel_change = features["accel_change"]
-    gap_irregularity = features["gap_irregularity"]
-    motion_score = features["motion_score"]
-    turn_prefix = features["turn_prefix"]
-    motion_prefix = features["motion_prefix"]
-    gap_irregularity_prefix = features["gap_irregularity_prefix"]
-
-    stack = [(0, n - 1)]
-    while stack:
-        start, end = stack.pop()
-        if end <= start + 1:
-            continue
-
-        a = points[start]
-        b = points[end]
-
-        mean_turn = _segment_complexity(turn_prefix, start, end)
-        mean_motion = _segment_complexity(motion_prefix, start, end)
-        mean_gap_irregularity = _segment_complexity(gap_irregularity_prefix, start, end)
-
-        local_eps = base_eps / (
-            1.0 + 1.10 * mean_turn + 0.30 * mean_motion + 0.35 * mean_gap_irregularity
-        )
-
-        best_score = -1.0
-        split_idx = -1
-        split_ped = 0.0
-
-        anchor_angle = angle_of_segment(a, b)
-
-        for i in range(start + 1, end):
-            ped = perpendicular_distance(points[i], a, b)
-            local_angle = angle_of_segment(points[i - 1], points[i + 1]) if i + 1 < n else anchor_angle
-            anchor_angle_gap = angle_diff_rad(anchor_angle, local_angle)
-
-            score = ped * (
-                1.0
-                + 2.40 * turn_dev[i]
-                + 0.10 * speed_change[i]
-                + 0.06 * accel_change[i]
-                + 0.45 * gap_irregularity[i]
-                + 0.55 * anchor_angle_gap
-            )
-
-            if score > best_score:
-                best_score = score
-                split_idx = i
-                split_ped = ped
-
-        if split_idx == -1:
-            continue
-
-        preserve_motion = motion_score[split_idx] > 0.35 or turn_dev[split_idx] > math.radians(18.0)
-        if split_ped > local_eps or preserve_motion:
-            kept.add(split_idx)
-            stack.append((start, split_idx))
-            stack.append((split_idx, end))
-
-
-def simpl_dp_indices(points: Sequence[PointXY], times: Sequence[Optional[float]], target_k: int) -> List[int]:
-    n = len(points)
-    if n <= target_k:
-        return list(range(n))
-
-    features = build_motion_features(points, times)
-
-    def run(eps: float) -> List[int]:
-        kept = {0, n - 1}
-        _dp_keep_improved(points, eps, kept, features)
-        return sorted(kept)
-
-    lo, hi = 0.0, max(path_length(points), 1.0)
-    best = list(range(n))
-
-    for _ in range(28):
-        mid = (lo + hi) / 2.0
-        idx = run(mid)
-        if len(idx) > target_k:
-            lo = mid
-        else:
-            best = idx
-            hi = mid
-
-    return exact_target_indices(best, n, target_k, points, features["turn_dev"], features["motion_score"])
+    target_k: int,
+    times: Optional[Sequence[Optional[float]]] = None,
+) -> List[int]:
+    # The improved variant currently reuses the same stable DP core.
+    # Keeping the optional time argument makes the public API consistent
+    # with callers that pass timestamps.
+    _ = times
+    return simpl_dp_indices_original(points, target_k)
 
 
 def simpl_vw_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
@@ -541,17 +276,13 @@ def simpl_vw_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
     if n <= target_k:
         return list(range(n))
 
-    turn_dev = [0.0] * n
-    for i in range(1, n - 1):
-        turn_dev[i] = abs(math.pi - local_turn_angle(points, i))
-
     prev_idx = [i - 1 for i in range(n)]
     next_idx = [i + 1 for i in range(n)]
     next_idx[-1] = -1
     removed = [False] * n
-    heap = []
+    heap: List[Tuple[float, int, int, int]] = []
 
-    def push(i: int):
+    def push(i: int) -> None:
         if i <= 0 or i >= n - 1 or removed[i]:
             return
         a = prev_idx[i]
@@ -581,17 +312,13 @@ def simpl_vw_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
         push(c)
 
     idx = [i for i in range(n) if not removed[i]]
-    return exact_target_indices(idx, n, target_k, points, turn_dev, turn_dev)
+    return exact_target_indices(idx, n, target_k, points)
 
 
 def simpl_sliding_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
     n = len(points)
     if n <= target_k:
         return list(range(n))
-
-    turn_dev = [0.0] * n
-    for i in range(1, n - 1):
-        turn_dev[i] = abs(math.pi - local_turn_angle(points, i))
 
     def run(eps: float) -> List[int]:
         kept = [0]
@@ -613,7 +340,7 @@ def simpl_sliding_indices(points: Sequence[PointXY], target_k: int) -> List[int]
 
     lo, hi = 0.0, max(path_length(points), 1.0)
     best = list(range(n))
-    for _ in range(28):
+    for _ in range(32):
         mid = (lo + hi) / 2.0
         idx = run(mid)
         if len(idx) > target_k:
@@ -621,18 +348,13 @@ def simpl_sliding_indices(points: Sequence[PointXY], target_k: int) -> List[int]
         else:
             best = idx
             hi = mid
-
-    return exact_target_indices(best, n, target_k, points, turn_dev, turn_dev)
+    return exact_target_indices(best, n, target_k, points)
 
 
 def simpl_rw_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
     n = len(points)
     if n <= target_k:
         return list(range(n))
-
-    turn_dev = [0.0] * n
-    for i in range(1, n - 1):
-        turn_dev[i] = abs(math.pi - local_turn_angle(points, i))
 
     def run(strip: float) -> List[int]:
         kept = [0]
@@ -649,7 +371,7 @@ def simpl_rw_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
 
     lo, hi = 0.0, max(path_length(points), 1.0)
     best = list(range(n))
-    for _ in range(28):
+    for _ in range(32):
         mid = (lo + hi) / 2.0
         idx = run(mid)
         if len(idx) > target_k:
@@ -657,8 +379,7 @@ def simpl_rw_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
         else:
             best = idx
             hi = mid
-
-    return exact_target_indices(best, n, target_k, points, turn_dev, turn_dev)
+    return exact_target_indices(best, n, target_k, points)
 
 
 def simpl_squish_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
@@ -666,15 +387,11 @@ def simpl_squish_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
     if n <= target_k:
         return list(range(n))
 
-    turn_dev = [0.0] * n
-    for i in range(1, n - 1):
-        turn_dev[i] = abs(math.pi - local_turn_angle(points, i))
-
     prev_idx = [i - 1 for i in range(n)]
     next_idx = [i + 1 for i in range(n)]
     next_idx[-1] = -1
     removed = [False] * n
-    heap = []
+    heap: List[Tuple[float, int, int, int]] = []
 
     def priority(i: int) -> float:
         if i <= 0 or i >= n - 1 or removed[i]:
@@ -685,7 +402,7 @@ def simpl_squish_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
             return float("inf")
         return point_to_segment_distance(points[i], points[a], points[c])
 
-    def push(i: int):
+    def push(i: int) -> None:
         if i <= 0 or i >= n - 1 or removed[i]:
             return
         heapq.heappush(heap, (priority(i), i, prev_idx[i], next_idx[i]))
@@ -710,17 +427,16 @@ def simpl_squish_indices(points: Sequence[PointXY], target_k: int) -> List[int]:
         push(c)
 
     idx = [i for i in range(n) if not removed[i]]
-    return exact_target_indices(idx, n, target_k, points, turn_dev, turn_dev)
+    return exact_target_indices(idx, n, target_k, points)
 
 
 # ============================================================
-# 6. ERROR METRICS
+# 5. ERROR METRICS FROM THE PAPERS
 # ============================================================
 
 def aggregate(values: Sequence[float]) -> Dict[str, float]:
     if not values:
         return {"max": 0.0, "mean": 0.0, "rmse": 0.0, "sum": 0.0}
-
     total = sum(values)
     return {
         "max": max(values),
@@ -730,20 +446,12 @@ def aggregate(values: Sequence[float]) -> Dict[str, float]:
     }
 
 
-def synchronized_point(
-    a: PointXY,
-    ta: Optional[float],
-    b: PointXY,
-    tb: Optional[float],
-    t: Optional[float],
-) -> Optional[PointXY]:
+def synchronized_point(a: PointXY, ta: Optional[float], b: PointXY, tb: Optional[float], t: Optional[float]) -> Optional[PointXY]:
     if ta is None or tb is None or t is None:
         return None
-
     dt = tb - ta
     if dt <= 0:
         return None
-
     alpha = (t - ta) / dt
     x = a[0] + alpha * (b[0] - a[0])
     y = a[1] + alpha * (b[1] - a[1])
@@ -753,11 +461,9 @@ def synchronized_point(
 def safe_speed(a: PointXY, ta: Optional[float], b: PointXY, tb: Optional[float]) -> Optional[float]:
     if ta is None or tb is None:
         return None
-
     dt = tb - ta
     if dt <= 0:
         return None
-
     return point_distance(a, b) / dt
 
 
@@ -824,7 +530,7 @@ def compute_anchor_error_metrics(
 
 
 # ============================================================
-# 7. MAIN WRAPPER
+# 6. MAIN WRAPPER
 # ============================================================
 
 def simplify_all_algorithms(latlon_points, removal_rate: float = 0.50):
@@ -836,7 +542,6 @@ def simplify_all_algorithms(latlon_points, removal_rate: float = 0.50):
 
     coords_xy: List[PointXY] = []
     times: List[Optional[float]] = []
-
     for p in latlon_points:
         lat = float(p[0])
         lon = float(p[1])
@@ -844,7 +549,6 @@ def simplify_all_algorithms(latlon_points, removal_rate: float = 0.50):
         times.append(float(p[2]) if has_time and p[2] is not None else None)
 
     cleaned_xy, cleaned_times, outlier_info = remove_outliers_time_distance(coords_xy, times)
-
     if len(cleaned_xy) < 2:
         return cleaned_xy, {}, {}, outlier_info
 
@@ -852,12 +556,12 @@ def simplify_all_algorithms(latlon_points, removal_rate: float = 0.50):
     target_k = min(target_k, len(cleaned_xy))
 
     algorithms = {
-        "DP_ORIG": lambda pts, k: simpl_dp_indices_original(pts, k),
-        "DP": lambda pts, k: simpl_dp_indices(pts, cleaned_times, k),
-        "SQUISH": lambda pts, k: simpl_squish_indices(pts, k),
-        "VW": lambda pts, k: simpl_vw_indices(pts, k),
-        "SW": lambda pts, k: simpl_sliding_indices(pts, k),
-        "RW": lambda pts, k: simpl_rw_indices(pts, k),
+        "DP_ORIG": simpl_dp_indices_original,
+        "DP": lambda pts, k: simpl_dp_indices(pts, k, cleaned_times),
+        "SQUISH": simpl_squish_indices,
+        "VW": simpl_vw_indices,
+        "SW": simpl_sliding_indices,
+        "RW": simpl_rw_indices,
     }
 
     results: Dict[str, List[PointXY]] = {}
@@ -867,7 +571,6 @@ def simplify_all_algorithms(latlon_points, removal_rate: float = 0.50):
         start = time.perf_counter()
         kept_idx = func(cleaned_xy, target_k)
         runtime_ms = (time.perf_counter() - start) * 1000.0
-
         simplified = [cleaned_xy[i] for i in kept_idx]
         results[name] = simplified
 
@@ -877,11 +580,9 @@ def simplify_all_algorithms(latlon_points, removal_rate: float = 0.50):
         m["removed_points"] = len(cleaned_xy) - len(kept_idx)
         m["outliers_removed"] = outlier_info["removed"]
         m["compression_ratio"] = len(kept_idx) / len(cleaned_xy)
-
         orig_len = path_length(cleaned_xy)
         simp_len = path_length(simplified)
         m["length_ratio"] = (simp_len / orig_len) if orig_len > 0 else 1.0
-
         metrics[name] = m
 
     return cleaned_xy, results, metrics, outlier_info
